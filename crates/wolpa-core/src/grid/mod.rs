@@ -1,8 +1,25 @@
+//! ## Grid state machine
+//!
+//! This module maintains the 2D cell grid that represents the current Neovim
+//! screen state. It consumes `RedrawEvent`s and mutates internal state.
+//!
+//! ### Design
+//!
+//! - **Multi-grid**: Neovim can have multiple grids (grid 1 = main, grid 2+ = popupmenu,
+//!   floating windows, etc.). `GridState` manages them by `HashMap<u64, Grid>`.
+//! - **Flush-bounded**: Events between two `Flush` events form a batch. The caller
+//!   should `apply_batch()` then render once.
+//! - **Cell granularity**: The grid is cell-level (not pixel-level). Pixel layout
+//!   is handled by `wolpa-render`.
+
 use std::collections::HashMap;
 
 use super::event::{GridLineCell, RedrawEvent};
 
-/// A single cell in the grid.
+/// A single cell in the text grid.
+///
+/// Each cell holds one grapheme cluster and a highlight ID that indexes into
+/// the `HighlightResolver`. The default cell is a space (`' '`) with `hl_id = 0`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     pub text: String,
@@ -18,7 +35,11 @@ impl Default for Cell {
     }
 }
 
-/// A 2D grid of cells representing one screen surface.
+/// A 2D grid of cells representing one Neovim screen surface.
+///
+/// Cells are stored in row-major order. The grid supports line insertion,
+/// clearing, scrolling, and resizing. Bounds are checked on all operations;
+/// out-of-bounds cell access returns a reference to a space cell.
 #[derive(Debug, Clone)]
 pub struct Grid {
     pub id: u64,
@@ -30,6 +51,7 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// Create a new grid filled with default cells.
     pub fn new(id: u64, width: u64, height: u64) -> Self {
         let size = (width * height) as usize;
         Grid {
@@ -46,13 +68,16 @@ impl Grid {
         (row * self.width + col) as usize
     }
 
-    /// Get a cell reference (returns default for out-of-bounds).
+    /// Get a reference to the cell at `(row, col)`.
+    ///
+    /// Out-of-bounds access returns a reference to a default space cell.
     pub fn cell(&self, row: u64, col: u64) -> &Cell {
         let idx = self.index(row, col);
-        self.cells.get(idx).unwrap_or(&self.cells[0]) // fallback poor, but safe
+        self.cells.get(idx).unwrap_or(&self.cells[0])
     }
 
-    /// Set a cell.
+    /// Set the text and highlight of the cell at `(row, col)`.
+    /// Out-of-bounds writes are silently ignored.
     fn set_cell(&mut self, row: u64, col: u64, text: &str, hl_id: u64) {
         if row < self.height && col < self.width {
             let idx = self.index(row, col);
@@ -63,7 +88,10 @@ impl Grid {
         }
     }
 
-    /// Insert a line of cells starting at (row, col_start).
+    /// Insert a sequence of `GridLineCell`s starting at `(row, col_start)`.
+    ///
+    /// Handles run-length encoding: cells with `repeat > 1` are expanded
+    /// to `repeat` consecutive cells.
     fn put_line(&mut self, row: u64, col_start: u64, cells: &[GridLineCell]) {
         let mut col = col_start;
         for cell in cells {
@@ -75,14 +103,19 @@ impl Grid {
         }
     }
 
-    /// Clear all cells to default.
+    /// Reset all cells to the default (space, hl_id = 0).
     fn clear(&mut self) {
         for cell in &mut self.cells {
             *cell = Cell::default();
         }
     }
 
-    /// Scroll a region of the grid.
+    /// Scroll a rectangular region of the grid.
+    ///
+    /// - `rows > 0`: scroll down — content moves down, top rows cleared.
+    /// - `rows < 0`: scroll up — content moves up, bottom rows cleared.
+    ///
+    /// `cols` is accepted but not yet implemented (Neovim rarely sends column scrolls).
     fn scroll(&mut self, top: u64, bot: u64, left: u64, right: u64, rows: i64, _cols: i64) {
         let top = top.min(self.height);
         let bot = bot.min(self.height).max(top);
@@ -100,7 +133,6 @@ impl Grid {
                     self.cells.swap(src_idx, dst_idx);
                 }
             }
-            // Clear revealed rows at top
             for r in top..(top + rows as u64).min(bot) {
                 for c in left..right {
                     let idx = self.index(r, c);
@@ -121,7 +153,6 @@ impl Grid {
                     self.cells.swap(src_idx, dst_idx);
                 }
             }
-            // Clear revealed rows at bottom
             for r in bot.saturating_sub(count)..bot {
                 for c in left..right {
                     let idx = self.index(r, c);
@@ -133,6 +164,10 @@ impl Grid {
         }
     }
 
+    /// Resize the grid to `width × height`.
+    ///
+    /// Existing cell content is preserved where it fits within the new dimensions.
+    /// Cells outside the new bounds are discarded.
     fn resize(&mut self, width: u64, height: u64) {
         let new_size = (width * height) as usize;
         let mut new_cells = vec![Cell::default(); new_size];
@@ -154,10 +189,13 @@ impl Grid {
     }
 }
 
-/// The grid state machine.
+/// The top-level grid state: a collection of grids plus current mode.
 ///
-/// Maintains multiple grids (main grid 1, and aux grids for popupmenu etc.)
-/// and applies RedrawEvents to mutate state.
+/// ### Invariants
+///
+/// - Grid 1 always exists (the main editing grid).
+/// - `current_mode` and `current_mode_idx` are updated by `ModeChange` events.
+/// - Events that reference a non-existent grid create it on demand (`GridResize`).
 #[derive(Debug, Clone)]
 pub struct GridState {
     pub grids: HashMap<u64, Grid>,
@@ -166,6 +204,7 @@ pub struct GridState {
 }
 
 impl GridState {
+    /// Create a new grid state with a main grid of `width × height`.
     pub fn new(width: u64, height: u64) -> Self {
         let mut grids = HashMap::new();
         grids.insert(1, Grid::new(1, width, height));
@@ -176,15 +215,21 @@ impl GridState {
         }
     }
 
+    /// Get a reference to grid by ID.
     pub fn grid(&self, id: u64) -> Option<&Grid> {
         self.grids.get(&id)
     }
 
+    /// Get a mutable reference to grid by ID.
     pub fn grid_mut(&mut self, id: u64) -> Option<&mut Grid> {
         self.grids.get_mut(&id)
     }
 
-    /// Apply a single redraw event.
+    /// Apply a single redraw event, mutating the grid state.
+    ///
+    /// Events that affect highlight or rendering (e.g., `HlAttrDefine`,
+    /// `MsgShow`) are ignored here — they're handled by `HighlightResolver`
+    /// and the renderer respectively.
     pub fn apply(&mut self, event: &RedrawEvent) {
         match event {
             RedrawEvent::GridResize {
@@ -239,12 +284,11 @@ impl GridState {
                 self.current_mode = name.clone();
                 self.current_mode_idx = *index;
             }
-            // Other events are handled by the caller (renderer, UI, etc.)
             _ => {}
         }
     }
 
-    /// Apply a batch of redraw events.
+    /// Apply a batch of redraw events (between two `Flush` events).
     pub fn apply_batch(&mut self, events: &[RedrawEvent]) {
         for event in events {
             self.apply(event);

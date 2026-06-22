@@ -1,3 +1,29 @@
+//! ## msgpack-RPC client for Neovim
+//!
+//! Communicates with an `nvim --embed` process via msgpack-encoded messages
+//! over stdin/stdout. Handles message framing, request/response matching,
+//! and dispatching of redraw notifications.
+//!
+//! ### Message format (Neovim msgpack-RPC)
+//!
+//! All messages are bare msgpack arrays (no length prefix):
+//!
+//! ```text
+//! Request:      [0, msgid, "method", [args...]]
+//! Response:     [1, msgid, error, result]
+//! Notification: [2, "method", [args...]]
+//! ```
+//!
+//! ### Redraw lifecycle
+//!
+//! 1. `RpcClient::spawn()` — Start `nvim --embed --clean`.
+//! 2. `ui_attach(width, height)` — Send `nvim_ui_attach`. Neovim resizes grid 1
+//!    and starts sending redraw batches bounded by `flush`.
+//! 3. `command()` / `input()` — Send editing commands.
+//! 4. The caller reads redraw events (via `parse_notification`) and applies them
+//!    to `GridState` and `HighlightResolver`.
+//! 5. `shutdown()` — Kill the nvim process.
+
 use rmpv::Value;
 use std::collections::HashMap;
 use std::io;
@@ -11,6 +37,7 @@ use super::event::{
     RgbAttr, TablineInfo, UiEvent,
 };
 
+/// Errors that can occur during RPC communication.
 #[derive(Error, Debug)]
 pub enum RpcError {
     #[error("io error: {0}")]
@@ -29,7 +56,11 @@ pub enum RpcError {
 
 pub type Result<T> = std::result::Result<T, RpcError>;
 
-/// Neovim msgpack-RPC client.
+/// A connected Neovim instance running in `--embed` mode.
+///
+/// Owns the child process and its stdin/stdout pipes. All communication
+/// is async via `tokio`. The client is not `Clone` — a single client
+/// corresponds to a single nvim instance.
 pub struct RpcClient {
     child: Child,
     stdin: tokio::io::BufWriter<tokio::process::ChildStdin>,
@@ -38,7 +69,10 @@ pub struct RpcClient {
 }
 
 impl RpcClient {
-    /// Spawn `nvim --embed --clean`.
+    /// Spawn `nvim --embed --clean` and set up async I/O pipes.
+    ///
+    /// `--clean` ensures a predictable initial state (no plugins, no config).
+    /// `--headless` prevents nvim from trying to open a terminal UI.
     pub async fn spawn() -> Result<Self> {
         let mut child = Command::new("nvim")
             .args(["--embed", "--headless", "--clean"])
@@ -72,6 +106,11 @@ impl RpcClient {
         Ok(())
     }
 
+    /// Read a single msgpack value from nvim's stdout.
+    ///
+    /// Uses a simple buffered reader with incremental decoding: reads chunks
+    /// into a buffer, tries to decode a complete msgpack value, and loops
+    /// if more data is needed.
     async fn read_message(&mut self) -> Result<Value> {
         let mut decoder_buf = bytes::BytesMut::new();
         loop {
@@ -91,6 +130,11 @@ impl RpcClient {
         }
     }
 
+    /// Send a request and wait for the matching response.
+    ///
+    /// Notifications received while waiting are silently discarded.
+    /// In the current implementation, the caller should separately read
+    /// redraw events (see `parse_notification`) before or after calling this.
     pub async fn call(&mut self, method: &str, args: Vec<Value>) -> Result<Value> {
         let msg_id = self.next_msg_id();
         let msg = Value::Array(vec![
@@ -131,6 +175,11 @@ impl RpcClient {
         }
     }
 
+    /// Send `nvim_ui_attach` to connect as a UI client.
+    ///
+    /// Enables all recommended UI extensions: `ext_linegrid`, `ext_hlstate`,
+    /// `ext_messages`, `ext_popupmenu`, `ext_tabline`, `ext_termcolors`.
+    /// After this call succeeds, Neovim will send redraw events.
     pub async fn ui_attach(&mut self, width: u64, height: u64) -> Result<Value> {
         let mut opts: HashMap<String, Value> = HashMap::new();
         opts.insert("ext_linegrid".into(), Value::Boolean(true));
@@ -150,20 +199,30 @@ impl RpcClient {
         .await
     }
 
+    /// Send an `nvim_input` call to inject keystrokes.
+    ///
+    /// The `keys` parameter should use Neovim's key notation (e.g., `"<C-w>l"`).
+    /// See `:help key-notation`.
     pub async fn input(&mut self, keys: &str) -> Result<Value> {
         self.call("nvim_input", vec![Value::String(keys.into())])
             .await
     }
 
+    /// Send an `nvim_command` call to execute an Ex command.
     pub async fn command(&mut self, cmd: &str) -> Result<Value> {
         self.call("nvim_command", vec![Value::String(cmd.into())])
             .await
     }
 
+    /// Force a redraw flush by running `:redraw`.
+    ///
+    /// Useful in tests to ensure redraw events have been sent before checking
+    /// grid state.
     pub async fn redraw_flush(&mut self) -> Result<Value> {
         self.command("redraw").await
     }
 
+    /// Kill the nvim process and wait for it to terminate.
     pub async fn shutdown(&mut self) -> Result<()> {
         let _ = self.stdin.flush().await;
         let _ = self.child.kill().await;
@@ -172,8 +231,11 @@ impl RpcClient {
     }
 }
 
-// ── Event parsing ──────────────────────────────────────────────────────
+// ── Event parsing helpers ──────────────────────────────────────────────
 
+/// Parse the cells array from a `grid_line` event.
+///
+/// Each cell is a tuple `[text, hl_id?, repeat?]`. Handles run-length encoding.
 fn parse_grid_line_cells(cells: &[Value]) -> Vec<GridLineCell> {
     let mut result = Vec::new();
     for cell in cells {
@@ -332,6 +394,10 @@ fn parse_tabline_item(v: &Value) -> TablineInfo {
     }
 }
 
+/// Parse a single redraw event from a `[event_name, arg1, arg2, ...]` array.
+///
+/// This is the core parser for all Neovim UI events. Each event name maps to
+/// a `RedrawEvent` variant. Unknown event names are silently ignored.
 pub fn parse_redraw_event(arr: &[Value]) -> Option<RedrawEvent> {
     let name = arr.first()?.as_str()?;
     let args: Vec<&Value> = arr.iter().skip(1).collect();
@@ -571,7 +637,11 @@ pub fn parse_redraw_event(arr: &[Value]) -> Option<RedrawEvent> {
     }
 }
 
-/// Parse a UI notification: [2, "method", ...args]
+/// Parse a UI notification: `[2, "method", ...args]`.
+///
+/// For `"redraw"` notifications, the single argument is an array of event arrays:
+/// `[2, "redraw", [[event1], [event2], ...]]`. Each inner array is parsed by
+/// `parse_redraw_event`.
 pub fn parse_ui_notification(msg: &[Value]) -> Option<UiEvent> {
     let method = msg.get(1)?.as_str()?;
     let args: Vec<&Value> = msg.iter().skip(2).collect();
@@ -594,7 +664,10 @@ pub fn parse_ui_notification(msg: &[Value]) -> Option<UiEvent> {
     }
 }
 
-/// Parse a msgpack value as a notification array.
+/// Parse a msgpack value as a notification array and convert it to a `UiEvent`.
+///
+/// This is the main entry point for consuming raw msgpack values from nvim's stdout
+/// and turning them into typed UI events.
 pub fn parse_notification(value: &Value) -> Option<UiEvent> {
     value.as_array().and_then(|arr| parse_ui_notification(arr))
 }

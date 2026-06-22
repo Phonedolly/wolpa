@@ -26,3 +26,6 @@ Swift thin shell (AppKit NSView, IME, menu).
 7. New crate → add to workspace `Cargo.toml` `[workspace].members`.
 8. FFI surface changed → regenerate header + verify Swift compiles.
 9. macOS-only code (render, bridge crates) gate with `#[cfg(target_os = "macos")]`.
+10. Every file starts with a `//!` module-level doc comment. Every module and
+    important function has a multiline `///` doc comment explaining its purpose,
+    contracts, and invariants.
