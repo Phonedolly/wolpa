@@ -137,3 +137,22 @@ pub unsafe extern "C" fn wolpa_input(
     ctx.runtime
         .block_on(async { ctx.client.input(&keys).await.is_ok() })
 }
+
+/// Get the font cell size in pixels.
+///
+/// # Safety
+///
+/// `ctx` must be valid. `width` and `height` must be valid f64 pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wolpa_get_cell_size(
+    ctx: *const WolpaContext,
+    width: *mut f64,
+    height: *mut f64,
+) {
+    if ctx.is_null() || width.is_null() || height.is_null() {
+        return;
+    }
+    let ctx = &*ctx;
+    *width = ctx.font.metrics.width;
+    *height = ctx.font.metrics.height;
+}

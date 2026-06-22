@@ -256,12 +256,21 @@ impl MetalRenderer {
 
         let target_grid = grid.grid(2).or_else(|| grid.grid(1));
         if let Some(g) = target_grid {
+            // Cursor position
+            let cur_row = g.cursor_row;
+            let cur_col = g.cursor_col;
+
             for row in 0..g.height {
                 for col in 0..g.width {
                     let cell = g.cell(row, col);
                     let attr = highlight.resolve(cell.hl_id);
-                    let bg = attr.background.unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                    let mut bg = attr.background.unwrap_or([0.0, 0.0, 0.0, 1.0]);
                     let fg = attr.foreground.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+
+                    // Highlight cursor cell
+                    if row == cur_row && col == cur_col {
+                        bg = [0.4, 0.5, 0.6, 1.0];
+                    }
 
                     let (px, py) = self.layout.cell_to_pixel(col, row);
                     let pw = self.layout.cell_width;

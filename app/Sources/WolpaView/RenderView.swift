@@ -9,7 +9,6 @@ public final class RenderView: NSView {
     public var metalLayer: CAMetalLayer!
     public var ctx: OpaquePointer?
     public var displayLink: CVDisplayLink?
-    /// Must outlive the CVDisplayLink callback. Stores the ctx pointer.
     private var ctxRef: OpaquePointer?
 
     public override init(frame: NSRect) {
@@ -33,14 +32,31 @@ public final class RenderView: NSView {
         layer = metalLayer
     }
 
+    override public var acceptsFirstResponder: Bool { true }
+
     override public func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+
         metalLayer.frame = bounds
 
         let cols: UInt64 = 80
         let rows: UInt64 = 24
         ctx = Bridge.initialize(layer: metalLayer, cols: cols, rows: rows)
         ctxRef = ctx
+
+        // Update drawable size based on font metrics
+        var cw: Double = 0
+        var ch: Double = 0
+        if let c = ctx {
+            wolpa_get_cell_size(c, &cw, &ch)
+            if cw > 0 && ch > 0 {
+                let pw = CGFloat(cols) * CGFloat(cw) + 4
+                let ph = CGFloat(rows) * CGFloat(ch) + 4
+                metalLayer.frame = CGRect(x: 0, y: 0, width: pw, height: ph)
+                metalLayer.drawableSize = CGSize(width: pw, height: ph)
+            }
+        }
 
         startDisplayLink()
     }
@@ -61,10 +77,63 @@ public final class RenderView: NSView {
         }
 
         CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
-        CVDisplayLinkSetOutputCallback(
-            displayLink!, callback, &ctxRef
-        )
+        CVDisplayLinkSetOutputCallback(displayLink!, callback, &ctxRef)
         CVDisplayLinkStart(displayLink!)
+    }
+
+    // MARK: - Keyboard Input
+
+    override public func keyDown(with event: NSEvent) {
+        guard let ctx = ctx else {
+            super.keyDown(with: event)
+            return
+        }
+
+        let input = translateKeyEvent(event)
+        if !input.isEmpty {
+            input.withCString { ptr in
+                wolpa_input(ctx, ptr)
+            }
+        }
+    }
+
+    private func translateKeyEvent(_ event: NSEvent) -> String {
+        let chars = event.characters ?? ""
+        let modifiers = event.modifierFlags
+
+        if modifiers.contains(.command) {
+            return "" // Handled by menu system
+        }
+
+        // Special keys
+        switch event.keyCode {
+        case 36: return "\r"       // Return
+        case 48: return "\t"       // Tab
+        case 51: return "\u{7f}"   // Delete/Backspace
+        case 53: return "\u{1b}"   // Escape
+        case 123: return "\u{1b}[D" // Left arrow → <Left>
+        case 124: return "\u{1b}[C" // Right arrow
+        case 125: return "\u{1b}[B" // Down arrow
+        case 126: return "\u{1b}[A" // Up arrow
+        default: break
+        }
+
+        // Build key notation with modifiers
+        var result = ""
+        if modifiers.contains(.control) { result += "<C-" }
+        if modifiers.contains(.option) { result += "<M-" }
+
+        if !chars.isEmpty {
+            let ch = String(chars.first!)
+            if ch == " " { return " " }
+            if result.isEmpty {
+                return ch
+            }
+            result += ch + ">"
+            return result
+        }
+
+        return chars
     }
 
     public func stop() {

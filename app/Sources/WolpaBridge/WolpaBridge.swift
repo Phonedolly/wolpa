@@ -13,6 +13,12 @@ public func wolpa_render(_ ctx: OpaquePointer)
 @_silgen_name("wolpa_destroy")
 public func wolpa_destroy(_ ctx: OpaquePointer)
 
+@_silgen_name("wolpa_input")
+public func wolpa_input(_ ctx: OpaquePointer, _ keys: UnsafePointer<CChar>) -> Bool
+
+@_silgen_name("wolpa_get_cell_size")
+public func wolpa_get_cell_size(_ ctx: OpaquePointer, _ width: UnsafeMutablePointer<Double>, _ height: UnsafeMutablePointer<Double>)
+
 public enum Bridge {
 
     /// Initialize the renderer with a CAMetalLayer.
