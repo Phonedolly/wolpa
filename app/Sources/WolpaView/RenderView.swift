@@ -9,6 +9,8 @@ public final class RenderView: NSView {
     public var metalLayer: CAMetalLayer!
     public var ctx: OpaquePointer?
     public var displayLink: CVDisplayLink?
+    /// Must outlive the CVDisplayLink callback. Stores the ctx pointer.
+    private var ctxRef: OpaquePointer?
 
     public override init(frame: NSRect) {
         super.init(frame: frame)
@@ -38,6 +40,7 @@ public final class RenderView: NSView {
         let cols: UInt64 = 80
         let rows: UInt64 = 24
         ctx = Bridge.initialize(layer: metalLayer, cols: cols, rows: rows)
+        ctxRef = ctx
 
         startDisplayLink()
     }
@@ -45,7 +48,9 @@ public final class RenderView: NSView {
     override public func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         metalLayer.frame = bounds
-        metalLayer.drawableSize = convertToBacking(bounds).size
+        if bounds.size.width > 0 && bounds.size.height > 0 {
+            metalLayer.drawableSize = convertToBacking(bounds).size
+        }
     }
 
     private func startDisplayLink() {
@@ -55,7 +60,6 @@ public final class RenderView: NSView {
             return kCVReturnSuccess
         }
 
-        var ctxRef = ctx
         CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
         CVDisplayLinkSetOutputCallback(
             displayLink!, callback, &ctxRef

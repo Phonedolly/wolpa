@@ -219,6 +219,9 @@ impl MetalRenderer {
 
             // Get drawable size for clip space transform
             let ds: core_graphics::geometry::CGSize = unsafe { msg_send![layer, drawableSize] };
+            if ds.width <= 0.0 || ds.height <= 0.0 {
+                return;
+            }
             let screen_w = ds.width as f32;
             let screen_h = ds.height as f32;
 
@@ -232,8 +235,13 @@ impl MetalRenderer {
                 color_attach.set_store_action(metal::MTLStoreAction::Store);
             }
 
-            if !all_cells.is_empty() {
-                self.build_quads(&all_cells, screen_w, screen_h);
+            // Clamp to buffer capacity
+            let max_cells = (self.cols * self.rows) as usize;
+            let cell_count = all_cells.len().min(max_cells);
+            let vertex_count = (cell_count * 6) as u64;
+
+            if cell_count > 0 {
+                self.build_quads(&all_cells[..cell_count], screen_w, screen_h);
             }
 
             let command_buffer = self.command_queue.new_command_buffer();
@@ -241,11 +249,7 @@ impl MetalRenderer {
             encoder.set_render_pipeline_state(&self.bg_pipeline);
             encoder.set_vertex_buffer(0, Some(&self.vertex_buffer), 0);
             encoder.set_fragment_buffer(0, Some(&self.color_buffer), 0);
-            encoder.draw_primitives(
-                metal::MTLPrimitiveType::Triangle,
-                0,
-                (all_cells.len() * 6) as u64,
-            );
+            encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, vertex_count);
             encoder.end_encoding();
 
             let draw_ref = unsafe { metal::MetalDrawableRef::from_ptr(drawable as *mut _) };
