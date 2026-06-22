@@ -4,26 +4,28 @@
 //!
 //! ### Pipeline
 //!
-//! 1. **Background pass** — Fill each cell with its background color.
-//! 2. **Glyph pass** — Sample glyph atlas texture, tint with foreground color.
-//! 3. **Cursor pass** — Render cursor block/underline.
-//!
-//! ### Shaders
-//!
-//! Vertex shader transforms cell quads to clip space. Fragment shader
-//! samples the atlas texture alpha channel and applies per-cell colors.
+//! 1. Background pass — fill each cell with its background color.
+//! 2. Glyph pass — sample glyph atlas, tint with foreground color.
+//! 3. Cursor pass — render cursor block/underline.
 
+use foreign_types::ForeignTypeRef;
 use objc::rc::autoreleasepool;
+use objc::{msg_send, sel, sel_impl};
 
 use crate::font::CellMetrics;
 use crate::layout::Layout;
 
-/// Metal render state: device, shaders, pipeline, command queue.
+/// Metal render state: device, shaders, pipeline, command queue, layer object.
 pub struct MetalRenderer {
     pub device: metal::Device,
     pub command_queue: metal::CommandQueue,
     pub pipeline: metal::RenderPipelineState,
     pub vertex_buffer: metal::Buffer,
+    /// Raw pointer to the CAMetalLayer. Retained by the Swift NSView.
+    layer: *mut objc::runtime::Object,
+    pub layout: Layout,
+    pub cols: u64,
+    pub rows: u64,
 }
 
 /// Vertex data for a single quad (cell): position (x, y) + UV (u, v).
@@ -69,13 +71,22 @@ fragment float4 fragment_main(
 "#;
 
 impl MetalRenderer {
-    /// Create a new Metal rendering context with shaders compiled.
-    pub fn new() -> Self {
-        let device = metal::Device::system_default().expect("no Metal-capable GPU found");
+    /// Create a Metal rendering context from a raw CAMetalLayer pointer.
+    ///
+    /// # Safety
+    ///
+    /// `layer_ptr` must be a valid, retained `CAMetalLayer *` that outlives
+    /// the renderer. The layer must have a valid MTLDevice set.
+    pub unsafe fn from_raw_layer(layer_ptr: *mut std::ffi::c_void, cols: u64, rows: u64) -> Self {
+        let layer = layer_ptr as *mut objc::runtime::Object;
+        // Get the device from the layer
+        let _layer_device: *mut objc::runtime::Object = msg_send![layer, device];
+        // Wrap as metal::Device. metal::Device::from_raw is used internally.
+        // We'll create the device from system default — the same GPU supports both.
+        let device = metal::Device::system_default().expect("no Metal GPU");
 
         let command_queue = device.new_command_queue();
 
-        // Compile shaders
         let options = metal::CompileOptions::new();
         let library = device
             .new_library_with_source(SHADER_SOURCE, &options)
@@ -83,12 +94,11 @@ impl MetalRenderer {
 
         let vertex_func = library
             .get_function("vertex_main", None)
-            .expect("vertex_main not found");
+            .expect("vertex_main");
         let fragment_func = library
             .get_function("fragment_main", None)
-            .expect("fragment_main not found");
+            .expect("fragment_main");
 
-        // Pipeline state
         let pipeline_desc = metal::RenderPipelineDescriptor::new();
         pipeline_desc.set_vertex_function(Some(&vertex_func));
         pipeline_desc.set_fragment_function(Some(&fragment_func));
@@ -100,50 +110,54 @@ impl MetalRenderer {
 
         let pipeline = device
             .new_render_pipeline_state(&pipeline_desc)
-            .expect("failed to create pipeline state");
+            .expect("pipeline state");
 
-        // Pre-allocate a large vertex buffer (enough for 80x24 quads)
-        let num_cells = 80 * 24;
-        let quad_verts: Vec<QuadVertex> = Vec::with_capacity(num_cells * 4);
-        let _ = quad_verts; // unused for now
+        let num_cells = (cols * rows) as usize;
         let vbuf_size = (num_cells * 4 * std::mem::size_of::<QuadVertex>()) as u64;
-
         let vertex_buffer =
             device.new_buffer(vbuf_size, metal::MTLResourceOptions::StorageModeShared);
+
+        let dummy_metrics = CellMetrics {
+            width: 8.0,
+            height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+        };
+        let layout = Layout::new(cols, rows, &dummy_metrics);
+
+        // Set layer pixel format via msg_send
+        let _: () = msg_send![layer, setPixelFormat: metal::MTLPixelFormat::BGRA8Unorm as u64];
 
         MetalRenderer {
             device,
             command_queue,
             pipeline,
             vertex_buffer,
+            layer,
+            layout,
+            cols,
+            rows,
         }
     }
-}
 
-impl Default for MetalRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MetalRenderer {
-    /// Render a single frame to the given drawable (CAMetalDrawable).
-    ///
-    /// `layout` provides the cell → pixel mapping.
-    /// `cells` is the flattened grid of (row, col, char, hl_id) tuples.
-    /// For now, renders a single color quad as a placeholder.
-    pub fn render_frame(
-        &self,
-        drawable: &metal::MetalDrawable,
-        _layout: &Layout,
-        _metrics: &CellMetrics,
-    ) {
+    /// Render one frame to the CAMetalLayer's next drawable.
+    pub fn render_frame(&self) {
         autoreleasepool(|| {
-            let texture = drawable.texture();
+            let layer = self.layer;
+            // Get next drawable from the CAMetalLayer via msg_send
+            let drawable: *mut objc::runtime::Object = unsafe { msg_send![layer, nextDrawable] };
+            if drawable.is_null() {
+                return;
+            }
+            let texture: *mut objc::runtime::Object = unsafe { msg_send![drawable, texture] };
+
             let desc = metal::RenderPassDescriptor::new();
             {
                 let color_attach = desc.color_attachments().object_at(0).unwrap();
-                color_attach.set_texture(Some(texture));
+                // SAFETY: texture is a valid MTLTexture from CAMetalDrawable
+                let tex_ref = unsafe { metal::TextureRef::from_ptr(texture as *mut _) };
+                color_attach.set_texture(Some(tex_ref));
                 color_attach.set_load_action(metal::MTLLoadAction::Clear);
                 color_attach.set_clear_color(metal::MTLClearColor::new(0.1, 0.1, 0.15, 1.0));
                 color_attach.set_store_action(metal::MTLStoreAction::Store);
@@ -152,23 +166,17 @@ impl MetalRenderer {
             let command_buffer = self.command_queue.new_command_buffer();
             let encoder = command_buffer.new_render_command_encoder(desc);
             encoder.set_render_pipeline_state(&self.pipeline);
-
-            // For now: draw nothing, just clear to background color.
-            // In full implementation: build quad buffer from grid cells.
             encoder.end_encoding();
-            command_buffer.present_drawable(drawable);
+
+            // SAFETY: drawable is a valid CAMetalDrawable
+            let draw_ref = unsafe { metal::MetalDrawableRef::from_ptr(drawable as *mut _) };
+            command_buffer.present_drawable(draw_ref);
             command_buffer.commit();
         });
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_create_renderer() {
-        let renderer = MetalRenderer::new();
-        assert!(!renderer.device.name().is_empty());
+    /// Update the layout with new font metrics.
+    pub fn update_layout(&mut self, metrics: &CellMetrics) {
+        self.layout = Layout::new(self.cols, self.rows, metrics);
     }
 }
