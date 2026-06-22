@@ -1,0 +1,16 @@
+# Rust
+/target/
+
+# Swift
+/.build/
+*.dSYM/
+*.xcuserdata/
+
+# Generated
+crates/wolpa-bridge/wolpa.h
+
+# macOS
+.DS_Store
+
+# Secrets
+.env

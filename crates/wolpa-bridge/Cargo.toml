@@ -1,0 +1,12 @@
+[package]
+name = "wolpa-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "C FFI bridge between Rust core and Swift AppKit shell"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+wolpa-core = { path = "../wolpa-core" }
+wolpa-render = { path = "../wolpa-render" }

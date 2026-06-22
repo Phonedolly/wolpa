@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/wolpa-core",
+    "crates/wolpa-render",
+    "crates/wolpa-bridge",
+    "crates/wolpa-cli",
+]
+resolver = "2"

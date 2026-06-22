@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo test --all-features
+      - run: cargo clippy -- -D warnings
+      - run: cargo fmt --check
+
+  swift:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path app
+
+  integration:
+    runs-on: macos-latest
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install neovim
+      - run: cargo test -- --ignored
