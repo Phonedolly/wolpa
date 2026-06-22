@@ -15,9 +15,10 @@ use wolpa_core::highlight::HighlightResolver;
 pub struct MetalRenderer {
     pub device: metal::Device,
     pub command_queue: metal::CommandQueue,
-    pub pipeline: metal::RenderPipelineState,
     pub bg_pipeline: metal::RenderPipelineState,
-    pub vertex_buffer: metal::Buffer,
+    pub pos_buffer: metal::Buffer,
+    pub uv_buffer: metal::Buffer,
+    pub idx_buffer: metal::Buffer,
     pub color_buffer: metal::Buffer,
     layer: *mut objc::runtime::Object,
     pub layout: Layout,
@@ -25,12 +26,13 @@ pub struct MetalRenderer {
     pub rows: u64,
 }
 
-/// Vertex data for a single quad (cell): position (x, y) + UV (u, v).
+/// Vertex data for a single quad (cell): position (x, y), UV (u, v), cell index.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct QuadVertex {
     pub position: [f32; 2],
     pub texcoord: [f32; 2],
+    pub cell_idx: u32,
 }
 
 /// Per-instance uniform: foreground and background colors.
@@ -49,6 +51,7 @@ using namespace metal;
 struct VertexOut {
     float4 position [[position]];
     float2 uv;
+    uint cell_idx;
 };
 
 struct CellColor {
@@ -56,25 +59,24 @@ struct CellColor {
     float4 bg;
 };
 
-// ── Background pass ─────────────────────────────────────────────
-
 vertex VertexOut bg_vertex(
     uint vertexID [[vertex_id]],
     constant float2* positions [[buffer(0)]],
-    constant float2* uvs [[buffer(1)]]
+    constant float2* uvs [[buffer(1)]],
+    constant uint* cell_indices [[buffer(2)]]
 ) {
     VertexOut out;
     out.position = float4(positions[vertexID], 0.0, 1.0);
     out.uv = uvs[vertexID];
+    out.cell_idx = cell_indices[vertexID];
     return out;
 }
 
 fragment float4 bg_fragment(
     VertexOut in [[stage_in]],
-    uint instanceID [[instance_id]],
     constant CellColor* colors [[buffer(0)]]
 ) {
-    return colors[instanceID].bg;
+    return colors[in.cell_idx].bg;
 }
 "#;
 
@@ -114,15 +116,15 @@ impl MetalRenderer {
             .new_render_pipeline_state(&bg_desc)
             .expect("bg pipeline state");
 
-        // Keep a simple pipeline for reference
-        let pipeline = bg_pipeline.clone();
-
         let num_cells = (cols * rows) as usize;
-        let vbuf_size = (num_cells * 6 * std::mem::size_of::<QuadVertex>()) as u64;
+        let vcount = num_cells * 6;
+        let pbuf_size = (vcount * std::mem::size_of::<[f32; 2]>()) as u64;
+        let ibuf_size = (vcount * std::mem::size_of::<u32>()) as u64;
         let cbuf_size = (num_cells * std::mem::size_of::<CellColor>()) as u64;
 
-        let vertex_buffer =
-            device.new_buffer(vbuf_size, metal::MTLResourceOptions::StorageModeShared);
+        let pos_buffer = device.new_buffer(pbuf_size, metal::MTLResourceOptions::StorageModeShared);
+        let uv_buffer = device.new_buffer(pbuf_size, metal::MTLResourceOptions::StorageModeShared);
+        let idx_buffer = device.new_buffer(ibuf_size, metal::MTLResourceOptions::StorageModeShared);
         let color_buffer =
             device.new_buffer(cbuf_size, metal::MTLResourceOptions::StorageModeShared);
 
@@ -140,9 +142,10 @@ impl MetalRenderer {
         MetalRenderer {
             device,
             command_queue,
-            pipeline,
             bg_pipeline,
-            vertex_buffer,
+            pos_buffer,
+            uv_buffer,
+            idx_buffer,
             color_buffer,
             layer,
             layout,
@@ -247,7 +250,9 @@ impl MetalRenderer {
             let command_buffer = self.command_queue.new_command_buffer();
             let encoder = command_buffer.new_render_command_encoder(desc);
             encoder.set_render_pipeline_state(&self.bg_pipeline);
-            encoder.set_vertex_buffer(0, Some(&self.vertex_buffer), 0);
+            encoder.set_vertex_buffer(0, Some(&self.pos_buffer), 0);
+            encoder.set_vertex_buffer(1, Some(&self.uv_buffer), 0);
+            encoder.set_vertex_buffer(2, Some(&self.idx_buffer), 0);
             encoder.set_fragment_buffer(0, Some(&self.color_buffer), 0);
             encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, vertex_count);
             encoder.end_encoding();
@@ -260,7 +265,9 @@ impl MetalRenderer {
 
     /// Build quad positions + colors into the vertex and color buffers.
     fn build_quads(&self, cells: &[(f64, f64, f64, f64, [f32; 4])], screen_w: f32, screen_h: f32) {
-        let vbuf = self.vertex_buffer.contents() as *mut QuadVertex;
+        let pbuf = self.pos_buffer.contents() as *mut [f32; 2];
+        let ubuf = self.uv_buffer.contents() as *mut [f32; 2];
+        let ibuf = self.idx_buffer.contents() as *mut u32;
         let cbuf = self.color_buffer.contents() as *mut CellColor;
 
         for (i, (px, py, pw, ph, bg)) in cells.iter().enumerate() {
@@ -301,10 +308,9 @@ impl MetalRenderer {
             unsafe {
                 for v in 0..6 {
                     let idx = i * 6 + v;
-                    *vbuf.add(idx) = QuadVertex {
-                        position: verts[v],
-                        texcoord: uvs[v],
-                    };
+                    *pbuf.add(idx) = verts[v];
+                    *ubuf.add(idx) = uvs[v];
+                    *ibuf.add(idx) = i as u32;
                 }
                 *cbuf.add(i) = CellColor {
                     fg: [1.0, 1.0, 1.0, 1.0],
