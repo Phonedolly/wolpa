@@ -201,6 +201,7 @@ impl RpcClient {
     pub async fn ui_attach(&mut self, width: u64, height: u64) -> Result<Value> {
         let mut opts: HashMap<String, Value> = HashMap::new();
         opts.insert("ext_linegrid".into(), Value::Boolean(true));
+        opts.insert("ext_multigrid".into(), Value::Boolean(true));
         opts.insert("ext_hlstate".into(), Value::Boolean(true));
         opts.insert("ext_messages".into(), Value::Boolean(true));
         opts.insert("ext_popupmenu".into(), Value::Boolean(true));
