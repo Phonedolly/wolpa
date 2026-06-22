@@ -29,3 +29,17 @@ Swift thin shell (AppKit NSView, IME, menu).
 10. Every file starts with a `//!` module-level doc comment. Every module and
     important function has a multiline `///` doc comment explaining its purpose,
     contracts, and invariants.
+11. Commits use [Conventional Commits](https://www.conventionalcommits.org/) with scope:
+
+    ```
+    <type>(<scope>): <description>
+
+    <body>
+    ```
+
+    | Field | Convention |
+    |---|---|
+    | type | `feat` `fix` `docs` `refactor` `test` `chore` `ci` `build` `perf` |
+    | scope | `core` (wolpa-core), `render` (wolpa-render), `bridge`, `cli`, `app`, `ci`, `repo` |
+    | description | lowercase, imperative mood, no period at end |
+    | body | blank line after description, wrapped at 72 chars, explains **what** and **why** |
