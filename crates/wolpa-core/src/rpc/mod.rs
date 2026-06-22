@@ -412,13 +412,21 @@ fn parse_tabline_item(v: &Value) -> TablineInfo {
     }
 }
 
-/// Parse a single redraw event from a `[event_name, arg1, arg2, ...]` array.
+/// Parse a single redraw event from a `[event_name, [arg1, arg2, ...]]` array.
 ///
-/// This is the core parser for all Neovim UI events. Each event name maps to
-/// a `RedrawEvent` variant. Unknown event names are silently ignored.
+/// The event format (nvim 0.10+) packs all arguments into a single sub-array.
+/// For backward compatibility with older nvim, if the second element is _not_
+/// an array, the remaining elements are treated as individual args.
 pub fn parse_redraw_event(arr: &[Value]) -> Option<RedrawEvent> {
     let name = arr.first()?.as_str()?;
-    let args: Vec<&Value> = arr.iter().skip(1).collect();
+
+    // Event format: [event_name, [arg1, arg2, ...]] (nvim 0.10+)
+    // For backward compat, also handle [event_name, arg1, arg2, ...]
+    let args: Vec<&Value> = if let Some(args_arr) = arr.get(1).and_then(|v| v.as_array()) {
+        args_arr.iter().collect()
+    } else {
+        arr.iter().skip(1).collect()
+    };
 
     match name {
         "grid_resize" => {
@@ -696,6 +704,29 @@ mod tests {
 
     #[test]
     fn test_parse_grid_resize() {
+        // New format: [event_name, [args...]]
+        let event = Value::Array(vec![
+            Value::String("grid_resize".into()),
+            Value::Array(vec![
+                Value::Integer(1.into()),
+                Value::Integer(80.into()),
+                Value::Integer(24.into()),
+            ]),
+        ]);
+        let parsed = parse_redraw_event(event.as_array().unwrap());
+        assert!(matches!(
+            parsed,
+            Some(RedrawEvent::GridResize {
+                grid: 1,
+                width: 80,
+                height: 24
+            })
+        ));
+    }
+
+    #[test]
+    fn test_parse_grid_resize_old_format() {
+        // Old format (backward compat): [event_name, arg1, arg2, ...]
         let event = Value::Array(vec![
             Value::String("grid_resize".into()),
             Value::Integer(1.into()),
@@ -717,12 +748,14 @@ mod tests {
     fn test_parse_grid_line() {
         let event = Value::Array(vec![
             Value::String("grid_line".into()),
-            Value::Integer(1.into()),
-            Value::Integer(0.into()),
-            Value::Integer(0.into()),
             Value::Array(vec![
-                Value::Array(vec![Value::String("H".into()), Value::Integer(0.into())]),
-                Value::Array(vec![Value::String("i".into())]),
+                Value::Integer(1.into()),
+                Value::Integer(0.into()),
+                Value::Integer(0.into()),
+                Value::Array(vec![
+                    Value::Array(vec![Value::String("H".into()), Value::Integer(0.into())]),
+                    Value::Array(vec![Value::String("i".into())]),
+                ]),
             ]),
         ]);
         let parsed = parse_redraw_event(event.as_array().unwrap());
@@ -748,18 +781,22 @@ mod tests {
 
     #[test]
     fn test_parse_grid_resize_correct_args() {
+        // Test the new format parsing logic directly
         let event = Value::Array(vec![
             Value::String("grid_resize".into()),
-            Value::Integer(1.into()),
-            Value::Integer(80.into()),
-            Value::Integer(24.into()),
+            Value::Array(vec![
+                Value::Integer(1.into()),
+                Value::Integer(80.into()),
+                Value::Integer(24.into()),
+            ]),
         ]);
         let arr = event.as_array().unwrap();
-        let args: Vec<&Value> = arr.iter().skip(1).collect();
-        assert_eq!(args.len(), 3);
-        assert_eq!(args[0].as_u64(), Some(1));
-        assert_eq!(args[1].as_u64(), Some(80));
-        assert_eq!(args[2].as_u64(), Some(24));
+        // verify the sub-array extraction
+        let args_arr = arr.get(1).and_then(|v| v.as_array()).unwrap();
+        assert_eq!(args_arr.len(), 3);
+        assert_eq!(args_arr[0].as_u64(), Some(1));
+        assert_eq!(args_arr[1].as_u64(), Some(80));
+        assert_eq!(args_arr[2].as_u64(), Some(24));
     }
 
     #[test]
@@ -770,11 +807,13 @@ mod tests {
             Value::Array(vec![
                 Value::Array(vec![
                     Value::String("grid_resize".into()),
-                    Value::Integer(1.into()),
-                    Value::Integer(80.into()),
-                    Value::Integer(24.into()),
+                    Value::Array(vec![
+                        Value::Integer(1.into()),
+                        Value::Integer(80.into()),
+                        Value::Integer(24.into()),
+                    ]),
                 ]),
-                Value::Array(vec![Value::String("flush".into())]),
+                Value::Array(vec![Value::String("flush".into()), Value::Array(vec![])]),
             ]),
         ]);
 
