@@ -6,7 +6,7 @@ description = "Neovim msgpack-RPC client, grid state machine, highlight resoluti
 
 [dependencies]
 rmpv = { version = "1", features = ["with-serde"] }
-tokio = { version = "1", features = ["process", "io-util", "rt"] }
+tokio = { version = "1", features = ["process", "io-util", "rt", "time"] }
 bytes = "1"
 thiserror = "2"
 log = "0.4"

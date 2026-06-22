@@ -70,6 +70,9 @@ pub struct RpcClient {
     /// read_message calls. Accumulates data until a complete value is decoded,
     /// then retains unconsumed bytes for the next call.
     read_buf: bytes::BytesMut,
+    /// Notifications received during `call()` that have not been consumed
+    /// by the caller yet. `drain_events()` returns these first.
+    pending_events: Vec<UiEvent>,
 }
 
 impl RpcClient {
@@ -94,6 +97,7 @@ impl RpcClient {
             stdout: BufReader::new(stdout),
             msg_id: 0,
             read_buf: bytes::BytesMut::with_capacity(8192),
+            pending_events: Vec::new(),
         })
     }
 
@@ -187,7 +191,12 @@ impl RpcClient {
                     }
                     return Ok(result);
                 }
-                2 => continue,
+                2 => {
+                    // Save notification for later retrieval via drain_events
+                    if let Some(event) = parse_ui_notification(arr) {
+                        self.pending_events.push(event);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -247,6 +256,34 @@ impl RpcClient {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
         Ok(())
+    }
+
+    /// Read a single msgpack value from nvim's stdout and parse it as a `UiEvent`.
+    ///
+    /// Returns `Ok(None)` if the message is not a notification (e.g., a response).
+    /// Returns `Err` on I/O or decode errors.
+    pub async fn read_event(&mut self) -> Result<Option<UiEvent>> {
+        let value = self.read_message().await?;
+        Ok(parse_notification(&value))
+    }
+
+    /// Drain all pending notifications from nvim's stdout.
+    ///
+    /// Returns events previously collected during `call()` first, then reads
+    /// from stdout until a short timeout with no data.
+    pub async fn drain_events(&mut self) -> Result<Vec<UiEvent>> {
+        let mut events: Vec<UiEvent> = std::mem::take(&mut self.pending_events);
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), self.read_event())
+                .await
+            {
+                Ok(Ok(Some(event))) => events.push(event),
+                Ok(Ok(None)) => continue,
+                Ok(Err(e)) => return Err(e),
+                Err(_elapsed) => break,
+            }
+        }
+        Ok(events)
     }
 }
 
