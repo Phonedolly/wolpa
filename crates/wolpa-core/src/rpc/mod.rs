@@ -66,6 +66,10 @@ pub struct RpcClient {
     stdin: tokio::io::BufWriter<tokio::process::ChildStdin>,
     stdout: BufReader<tokio::process::ChildStdout>,
     msg_id: u64,
+    /// Persistent buffer for incremental msgpack decoding across multiple
+    /// read_message calls. Accumulates data until a complete value is decoded,
+    /// then retains unconsumed bytes for the next call.
+    read_buf: bytes::BytesMut,
 }
 
 impl RpcClient {
@@ -89,6 +93,7 @@ impl RpcClient {
             stdin: tokio::io::BufWriter::new(stdin),
             stdout: BufReader::new(stdout),
             msg_id: 0,
+            read_buf: bytes::BytesMut::with_capacity(8192),
         })
     }
 
@@ -108,25 +113,38 @@ impl RpcClient {
 
     /// Read a single msgpack value from nvim's stdout.
     ///
-    /// Uses a simple buffered reader with incremental decoding: reads chunks
-    /// into a buffer, tries to decode a complete msgpack value, and loops
-    /// if more data is needed.
+    /// Uses a persistent buffer (`self.read_buf`) to handle the case where
+    /// multiple msgpack values arrive in one OS read. After decoding a value,
+    /// the consumed bytes are removed from the buffer so the next call can
+    /// decode the next value from the remaining data.
     async fn read_message(&mut self) -> Result<Value> {
-        let mut decoder_buf = bytes::BytesMut::new();
         loop {
+            // Try to decode from existing buffered data first
+            {
+                let mut cursor = std::io::Cursor::new(&self.read_buf[..]);
+                let pos_before = cursor.position();
+                match rmpv::decode::read_value(&mut cursor) {
+                    Ok(val) => {
+                        let consumed = cursor.position() as usize;
+                        let _ = self.read_buf.split_to(consumed);
+                        return Ok(val);
+                    }
+                    Err(rmpv::decode::Error::InvalidDataRead(_))
+                    | Err(rmpv::decode::Error::InvalidMarkerRead(_)) => {
+                        // Incomplete — restore position, read more data
+                        cursor.set_position(pos_before);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+
+            // Read more data from stdout
             let mut chunk = vec![0u8; 4096];
             let n = self.stdout.read(&mut chunk).await?;
             if n == 0 {
                 return Err(RpcError::UnexpectedMessage);
             }
-            decoder_buf.extend_from_slice(&chunk[..n]);
-            let mut cursor = std::io::Cursor::new(&decoder_buf[..]);
-            match rmpv::decode::read_value(&mut cursor) {
-                Ok(val) => return Ok(val),
-                Err(rmpv::decode::Error::InvalidDataRead(_))
-                | Err(rmpv::decode::Error::InvalidMarkerRead(_)) => continue,
-                Err(e) => return Err(e.into()),
-            }
+            self.read_buf.extend_from_slice(&chunk[..n]);
         }
     }
 
