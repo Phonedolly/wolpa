@@ -5,6 +5,7 @@ edition = "2021"
 description = "Core Text font shaping, glyph atlas, Metal draw pipeline"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+wolpa-core = { path = "../wolpa-core" }
 metal = "0.33"
 core-text = "22"
 core-graphics = "0.25"

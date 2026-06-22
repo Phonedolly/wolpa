@@ -471,6 +471,7 @@ dependencies = [
 name = "wolpa-bridge"
 version = "0.1.0"
 dependencies = [
+ "tokio",
  "wolpa-core",
  "wolpa-render",
 ]
@@ -505,4 +506,5 @@ dependencies = [
  "lru",
  "metal",
  "objc",
+ "wolpa-core",
 ]
