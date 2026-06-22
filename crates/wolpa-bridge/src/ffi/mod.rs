@@ -84,7 +84,7 @@ pub unsafe extern "C" fn wolpa_render(ctx: *mut WolpaContext) {
 
     // Build cell data from grid and render
     ctx.renderer
-        .render_grid(&ctx.grid, &ctx.highlight, &ctx.font.metrics);
+        .render_grid(&ctx.grid, &ctx.highlight, &ctx.font.metrics, &ctx.font);
 }
 
 /// Destroy the context and free all resources.

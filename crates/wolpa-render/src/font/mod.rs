@@ -1,10 +1,12 @@
 //! ## Font loading and text shaping via Core Text
 //!
-//! Loads a monospace system font, measures glyph metrics (cell width/height,
-//! baseline offset), and provides per-glyph rasterization for the atlas.
+//! Loads a monospace system font, measures glyph metrics, and rasterizes
+//! individual glyphs to alpha bitmaps for the atlas texture.
 
+use core_graphics::color_space::CGColorSpace;
+use core_graphics::context::CGContext;
 use core_graphics::font::CGGlyph;
-use core_graphics::geometry::CGSize;
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_text::font;
 use core_text::font::CTFont;
 
@@ -27,8 +29,6 @@ pub struct Font {
 
 impl Font {
     /// Load a monospace system font at the given point size.
-    ///
-    /// Tries SF Mono first, then Menlo, then Courier fallback.
     pub fn new(size: f64) -> Self {
         let ct_font = load_monospace_font(size);
         let metrics = measure_metrics(&ct_font);
@@ -37,6 +37,19 @@ impl Font {
             metrics,
             font_size: size,
         }
+    }
+
+    /// Get the CGGlyph for a character.
+    pub fn glyph_for_char(&self, ch: char) -> CGGlyph {
+        get_glyph(&self.ct_font, ch)
+    }
+
+    /// Rasterize a glyph to an 8-bit alpha bitmap.
+    ///
+    /// Returns (pixels, width, height) where pixels is row-major alpha values.
+    /// The bitmap is sized to fit the glyph's bounding box plus 1px padding.
+    pub fn rasterize_glyph(&self, ch: char) -> (Vec<u8>, usize, usize) {
+        rasterize(&self.ct_font, ch, self.metrics.ascent)
     }
 }
 
@@ -103,6 +116,63 @@ impl std::fmt::Debug for Font {
     }
 }
 
+/// Rasterize a single glyph to an 8-bit alpha bitmap.
+fn rasterize(font: &CTFont, ch: char, _ascent: f64) -> (Vec<u8>, usize, usize) {
+    let glyph = get_glyph(font, ch);
+    if glyph == 0 {
+        return (vec![0u8; 4], 2, 2);
+    }
+
+    let bbox: CGRect = font.get_bounding_rects_for_glyphs(
+        core_text::font_descriptor::kCTFontOrientationDefault,
+        &[glyph],
+    );
+
+    let pad: f64 = 2.0;
+    let w = (bbox.size.width.ceil() + pad * 2.0) as usize;
+    let h = (bbox.size.height.ceil() + pad * 2.0) as usize;
+    let w = w.max(1);
+    let h = h.max(1);
+    let len = w * h;
+
+    // Own the buffer so we can read after draw_glyphs consumes the context
+    let mut pixels: Vec<u8> = vec![255u8; len];
+
+    let color_space = CGColorSpace::create_device_gray();
+    let ctx = CGContext::create_bitmap_context(
+        Some(pixels.as_mut_ptr() as *mut _),
+        w,
+        h,
+        8,
+        w,
+        &color_space,
+        core_graphics::base::kCGImageAlphaNone,
+    );
+
+    let black = core_graphics::color::CGColor::rgb(0.0, 0.0, 0.0, 1.0);
+    ctx.set_fill_color(&black);
+
+    let x = -bbox.origin.x + pad;
+    let y = -bbox.origin.y + pad;
+    let pos = [CGPoint::new(x, y)];
+    font.draw_glyphs(&[glyph], &pos, ctx);
+
+    // Invert: white (255) bg → 0 alpha, black (0) glyph → 255 alpha
+    for p in &mut pixels {
+        *p = 255 - *p;
+    }
+    (pixels, w, h)
+}
+
+fn get_glyph(font: &CTFont, ch: char) -> CGGlyph {
+    let mut glyph: CGGlyph = 0;
+    let c = ch as u16;
+    unsafe {
+        font.get_glyphs_for_characters(&c as *const u16, &mut glyph as *mut _, 1);
+    }
+    glyph
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,8 +180,18 @@ mod tests {
     #[test]
     fn test_load_font() {
         let font = Font::new(14.0);
-        assert!(font.metrics.width > 0.0, "cell width should be positive");
-        assert!(font.metrics.height > 0.0, "cell height should be positive");
-        assert!(font.metrics.ascent > 0.0, "ascent should be positive");
+        assert!(font.metrics.width > 0.0);
+        assert!(font.metrics.height > 0.0);
+    }
+
+    #[test]
+    fn test_rasterize_glyph() {
+        let font = Font::new(14.0);
+        let (pixels, w, h) = font.rasterize_glyph('A');
+        assert!(w > 0 && h > 0, "bitmap should have non-zero size");
+        assert!(
+            pixels.iter().any(|&p| p > 0),
+            "glyph 'A' should have some non-zero alpha pixels"
+        );
     }
 }
