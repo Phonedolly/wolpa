@@ -5,7 +5,7 @@ edition = "2021"
 description = "Neovim msgpack-RPC client, grid state machine, highlight resolution"
 
 [dependencies]
-rmpv = "1"
+rmpv = { version = "1", features = ["with-serde"] }
 tokio = { version = "1", features = ["process", "io-util", "rt"] }
 bytes = "1"
 thiserror = "2"
@@ -13,3 +13,4 @@ log = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["process", "io-util", "rt", "macros"] }

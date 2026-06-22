@@ -2,7 +2,7 @@
 /target/
 
 # Swift
-/.build/
+app/.build/
 *.dSYM/
 *.xcuserdata/
 
