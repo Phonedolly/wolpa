@@ -22,6 +22,7 @@ pub struct WolpaContext {
     pub cols: u64,
     pub rows: u64,
     pub scale: f64,
+    input_queue: Vec<String>,
 }
 
 /// # Safety
@@ -59,6 +60,7 @@ pub unsafe extern "C" fn wolpa_init(
         cols,
         rows,
         scale,
+        input_queue: Vec::new(),
     });
     Box::into_raw(ctx)
 }
@@ -76,6 +78,10 @@ pub unsafe extern "C" fn wolpa_render(ctx: *mut WolpaContext) {
     ctx.runtime.block_on(async {
         if let Ok(events) = ctx.client.drain_events().await {
             apply_events(&mut ctx.grid, &mut ctx.highlight, &events);
+        }
+        // Process queued input on the non-main thread
+        for keys in ctx.input_queue.drain(..) {
+            ctx.client.input(&keys).await.ok();
         }
     });
 
@@ -107,9 +113,9 @@ pub unsafe extern "C" fn wolpa_input(
         return false;
     }
     let ctx = &mut *ctx;
-    let keys = std::ffi::CStr::from_ptr(keys_ptr).to_string_lossy();
-    ctx.runtime
-        .block_on(async { ctx.client.input(&keys).await.is_ok() })
+    let keys = unsafe { std::ffi::CStr::from_ptr(keys_ptr) }.to_string_lossy();
+    ctx.input_queue.push(keys.into_owned());
+    true
 }
 
 /// # Safety
