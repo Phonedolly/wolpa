@@ -11,3 +11,4 @@ crate-type = ["staticlib"]
 wolpa-core = { path = "../wolpa-core" }
 wolpa-render = { path = "../wolpa-render" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+rmpv = "1"

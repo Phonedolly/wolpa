@@ -25,17 +25,21 @@ pub struct Font {
     pub ct_font: CTFont,
     pub metrics: CellMetrics,
     pub font_size: f64,
+    pub scale: f64,
 }
 
 impl Font {
-    /// Load a monospace system font at the given point size.
-    pub fn new(size: f64) -> Self {
-        let ct_font = load_monospace_font(size);
-        let metrics = measure_metrics(&ct_font);
+    /// Load a monospace system font. `size` is physical pixels (pt * scale).
+    /// `scale` is the Retina factor (1.0 or 2.0).
+    pub fn new(size: f64, scale: f64) -> Self {
+        let pt_size = size / scale;
+        let ct_font = load_monospace_font(pt_size);
+        let metrics = measure_metrics(&ct_font, scale);
         Font {
             ct_font,
             metrics,
-            font_size: size,
+            font_size: pt_size,
+            scale,
         }
     }
 
@@ -49,7 +53,7 @@ impl Font {
     /// Returns (pixels, width, height) where pixels is row-major alpha values.
     /// The bitmap is sized to fit the glyph's bounding box plus 1px padding.
     pub fn rasterize_glyph(&self, ch: char) -> (Vec<u8>, usize, usize) {
-        rasterize(&self.ct_font, ch, self.metrics.ascent)
+        rasterize(&self.ct_font, ch, self.scale)
     }
 }
 
@@ -62,16 +66,13 @@ fn load_monospace_font(size: f64) -> CTFont {
     panic!("no monospace font found on the system");
 }
 
-/// Measure cell metrics from a CTFont.
-///
-/// Cell width is the advance of the 'M' glyph.
-/// Cell height is ascent + descent + leading.
-fn measure_metrics(font: &CTFont) -> CellMetrics {
-    let ascent = font.ascent();
-    let descent = font.descent();
-    let leading = font.leading();
+/// Measure cell metrics from a CTFont. `scale` multiplies to physical pixels.
+fn measure_metrics(font: &CTFont, scale: f64) -> CellMetrics {
+    let ascent = font.ascent() * scale;
+    let descent = font.descent() * scale;
+    let leading = font.leading() * scale;
     let height = ascent + descent + leading;
-    let advance = measure_glyph_advance(font, 'M').unwrap_or(8.0);
+    let advance = measure_glyph_advance(font, 'M').unwrap_or(8.0) * scale;
 
     CellMetrics {
         width: advance,
@@ -117,7 +118,7 @@ impl std::fmt::Debug for Font {
 }
 
 /// Rasterize a single glyph to an 8-bit alpha bitmap.
-fn rasterize(font: &CTFont, ch: char, _ascent: f64) -> (Vec<u8>, usize, usize) {
+fn rasterize(font: &CTFont, ch: char, scale: f64) -> (Vec<u8>, usize, usize) {
     let glyph = get_glyph(font, ch);
     if glyph == 0 {
         return (vec![0u8; 4], 2, 2);
@@ -128,9 +129,9 @@ fn rasterize(font: &CTFont, ch: char, _ascent: f64) -> (Vec<u8>, usize, usize) {
         &[glyph],
     );
 
-    let pad: f64 = 2.0;
-    let w = (bbox.size.width.ceil() + pad * 2.0) as usize;
-    let h = (bbox.size.height.ceil() + pad * 2.0) as usize;
+    let pad: f64 = 2.0 * scale;
+    let w = (bbox.size.width.ceil() * scale + pad * 2.0) as usize;
+    let h = (bbox.size.height.ceil() * scale + pad * 2.0) as usize;
     let w = w.max(1);
     let h = h.max(1);
     let len = w * h;
@@ -152,9 +153,12 @@ fn rasterize(font: &CTFont, ch: char, _ascent: f64) -> (Vec<u8>, usize, usize) {
     let black = core_graphics::color::CGColor::rgb(0.0, 0.0, 0.0, 1.0);
     ctx.set_fill_color(&black);
 
-    let x = -bbox.origin.x + pad;
-    let y = -bbox.origin.y + pad;
+    let x = -bbox.origin.x + pad / scale;
+    let y = -bbox.origin.y + pad / scale;
     let pos = [CGPoint::new(x, y)];
+
+    // Scale CTM for Retina: glyph rendered at 2x resolution
+    ctx.scale(scale, scale);
     font.draw_glyphs(&[glyph], &pos, ctx);
 
     // Invert: white (255) bg → 0 alpha, black (0) glyph → 255 alpha
@@ -179,14 +183,14 @@ mod tests {
 
     #[test]
     fn test_load_font() {
-        let font = Font::new(14.0);
+        let font = Font::new(14.0, 1.0);
         assert!(font.metrics.width > 0.0);
         assert!(font.metrics.height > 0.0);
     }
 
     #[test]
     fn test_rasterize_glyph() {
-        let font = Font::new(14.0);
+        let font = Font::new(14.0, 1.0);
         let (pixels, w, h) = font.rasterize_glyph('A');
         assert!(w > 0 && h > 0, "bitmap should have non-zero size");
         assert!(

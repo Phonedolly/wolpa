@@ -1,4 +1,4 @@
-/// NSView subclass hosting a CAMetalLayer and a display link render loop.
+/// NSView subclass hosting a CAMetalLayer, frosted glass background, and display link.
 import AppKit
 import Metal
 import QuartzCore
@@ -7,29 +7,44 @@ import WolpaBridge
 public final class RenderView: NSView {
 
     public var metalLayer: CAMetalLayer!
+    public var effectView: NSVisualEffectView!
     public var ctx: OpaquePointer?
     public var displayLink: CVDisplayLink?
     private var ctxRef: OpaquePointer?
+    private var cols: UInt64 = 80
+    private var rows: UInt64 = 24
 
     public override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        setupMetal()
+        setupLayers()
     }
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
-        setupMetal()
+        setupLayers()
     }
 
-    private func setupMetal() {
+    private func setupLayers() {
+        // Frosted glass background
+        effectView = NSVisualEffectView(frame: bounds)
+        effectView.autoresizingMask = [.width, .height]
+        effectView.blendingMode = .behindWindow
+        effectView.material = .dark
+        effectView.state = .active
+        addSubview(effectView)
+
+        // Metal layer on top
         metalLayer = CAMetalLayer()
         metalLayer.device = MTLCreateSystemDefaultDevice()
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = false
         metalLayer.frame = bounds
-        layer = metalLayer
+        metalLayer.isOpaque = false
+        metalLayer.backgroundColor = CGColor(red: 0, green: 0, blue: 0, alpha: 0)
+        wantsLayer = true
+        layer?.addSublayer(metalLayer)
     }
 
     override public var acceptsFirstResponder: Bool { true }
@@ -38,36 +53,39 @@ public final class RenderView: NSView {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
 
-        metalLayer.frame = bounds
-
-        let cols: UInt64 = 80
-        let rows: UInt64 = 24
-        ctx = Bridge.initialize(layer: metalLayer, cols: cols, rows: rows)
+        let scale = Double(metalLayer.contentsScale)
+        ctx = Bridge.initialize(layer: metalLayer, cols: cols, rows: rows, scale: scale)
         ctxRef = ctx
 
-        // Update drawable size based on font metrics
-        var cw: Double = 0
-        var ch: Double = 0
-        if let c = ctx {
-            wolpa_get_cell_size(c, &cw, &ch)
-            if cw > 0 && ch > 0 {
-                let pw = CGFloat(cols) * CGFloat(cw) + 4
-                let ph = CGFloat(rows) * CGFloat(ch) + 4
-                metalLayer.frame = CGRect(x: 0, y: 0, width: pw, height: ph)
-                metalLayer.drawableSize = CGSize(width: pw, height: ph)
-            }
-        }
-
+        updateDrawableSize()
         startDisplayLink()
     }
 
     override public func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         metalLayer.frame = bounds
+        effectView.frame = bounds
+        updateDrawableSize()
+    }
+
+    private func updateDrawableSize() {
+        let scale = Double(metalLayer.contentsScale)
+        var cw: Double = 0
+        var ch: Double = 0
+        if let c = ctx {
+            wolpa_get_cell_size(c, &cw, &ch)
+        }
+        if cw <= 0 { cw = 8 * scale }
+        if ch <= 0 { ch = 16 * scale }
+
+        let pw = CGFloat(cols) * CGFloat(cw) + 4
+        let ph = CGFloat(rows) * CGFloat(ch) + 4
         if bounds.size.width > 0 && bounds.size.height > 0 {
-            metalLayer.drawableSize = convertToBacking(bounds).size
+            metalLayer.drawableSize = CGSize(width: pw, height: ph)
         }
     }
+
+    // MARK: - Display Link
 
     private func startDisplayLink() {
         let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, ctxPtr in
@@ -88,7 +106,6 @@ public final class RenderView: NSView {
             super.keyDown(with: event)
             return
         }
-
         let input = translateKeyEvent(event)
         if !input.isEmpty {
             input.withCString { ptr in
@@ -101,24 +118,20 @@ public final class RenderView: NSView {
         let chars = event.characters ?? ""
         let modifiers = event.modifierFlags
 
-        if modifiers.contains(.command) {
-            return "" // Handled by menu system
-        }
+        if modifiers.contains(.command) { return "" }
 
-        // Special keys
         switch event.keyCode {
-        case 36: return "\r"       // Return
-        case 48: return "\t"       // Tab
-        case 51: return "\u{7f}"   // Delete/Backspace
-        case 53: return "\u{1b}"   // Escape
-        case 123: return "\u{1b}[D" // Left arrow → <Left>
-        case 124: return "\u{1b}[C" // Right arrow
-        case 125: return "\u{1b}[B" // Down arrow
-        case 126: return "\u{1b}[A" // Up arrow
+        case 36: return "\r"
+        case 48: return "\t"
+        case 51: return "\u{7f}"
+        case 53: return "\u{1b}"
+        case 123: return "\u{1b}[D"
+        case 124: return "\u{1b}[C"
+        case 125: return "\u{1b}[B"
+        case 126: return "\u{1b}[A"
         default: break
         }
 
-        // Build key notation with modifiers
         var result = ""
         if modifiers.contains(.control) { result += "<C-" }
         if modifiers.contains(.option) { result += "<M-" }
@@ -126,20 +139,15 @@ public final class RenderView: NSView {
         if !chars.isEmpty {
             let ch = String(chars.first!)
             if ch == " " { return " " }
-            if result.isEmpty {
-                return ch
-            }
+            if result.isEmpty { return ch }
             result += ch + ">"
             return result
         }
-
         return chars
     }
 
     public func stop() {
         CVDisplayLinkStop(displayLink!)
-        if let ctx {
-            wolpa_destroy(ctx)
-        }
+        if let ctx { wolpa_destroy(ctx) }
     }
 }
