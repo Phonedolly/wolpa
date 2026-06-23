@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var view: RenderView!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMenu()
+
         let width: CGFloat = 800
         let height: CGFloat = 500
 
@@ -23,10 +25,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         view = RenderView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         window.contentView = view
+        window.makeFirstResponder(view)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         view?.stop()
+    }
+
+    private func setupMenu() {
+        let mainMenu = NSMenu(title: "MainMenu")
+
+        // App menu
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu(title: "Wolpa")
+        appMenu.addItem(NSMenuItem(title: "Quit Wolpa", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appMenuItem.submenu = appMenu
+
+        NSApplication.shared.mainMenu = mainMenu
     }
 }
 

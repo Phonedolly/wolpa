@@ -1,3 +1,4 @@
+#![allow(clippy::missing_safety_doc)]
 //! ## FFI function declarations
 //!
 //! C-callable entry points consumed by the Swift AppKit layer.
@@ -25,8 +26,6 @@ pub struct WolpaContext {
     input_queue: Vec<String>,
 }
 
-/// # Safety
-/// `layer` must be a valid, retained `CAMetalLayer *`.
 #[no_mangle]
 pub unsafe extern "C" fn wolpa_init(
     layer: *mut c_void,
@@ -36,7 +35,6 @@ pub unsafe extern "C" fn wolpa_init(
 ) -> *mut WolpaContext {
     let renderer = MetalRenderer::from_raw_layer(layer, cols, rows);
     let font = Font::new(14.0 * scale, scale);
-
     let runtime = Runtime::new().expect("tokio runtime");
 
     let (client, grid, highlight) = runtime.block_on(async {
@@ -46,10 +44,17 @@ pub unsafe extern "C" fn wolpa_init(
         let mut grid = GridState::new(cols, rows);
         let mut highlight = HighlightResolver::new();
         apply_events(&mut grid, &mut highlight, &events);
+
+        // Smoke test: insert visible text to verify rendering works
+        client.input("iHello\x1b").await.ok();
+        client.redraw_flush().await.ok();
+        let events = client.drain_events().await.unwrap();
+        apply_events(&mut grid, &mut highlight, &events);
+
         (client, grid, highlight)
     });
 
-    let ctx = Box::new(WolpaContext {
+    Box::into_raw(Box::new(WolpaContext {
         renderer,
         font,
         runtime,
@@ -61,12 +66,9 @@ pub unsafe extern "C" fn wolpa_init(
         rows,
         scale,
         input_queue: Vec::new(),
-    });
-    Box::into_raw(ctx)
+    }))
 }
 
-/// # Safety
-/// `ctx` must be a valid pointer.
 #[no_mangle]
 pub unsafe extern "C" fn wolpa_render(ctx: *mut WolpaContext) {
     if ctx.is_null() {
@@ -79,7 +81,6 @@ pub unsafe extern "C" fn wolpa_render(ctx: *mut WolpaContext) {
         if let Ok(events) = ctx.client.drain_events().await {
             apply_events(&mut ctx.grid, &mut ctx.highlight, &events);
         }
-        // Process queued input on the non-main thread
         for keys in ctx.input_queue.drain(..) {
             ctx.client.input(&keys).await.ok();
         }
@@ -89,8 +90,6 @@ pub unsafe extern "C" fn wolpa_render(ctx: *mut WolpaContext) {
         .render_grid(&ctx.grid, &ctx.highlight, &ctx.font.metrics, &ctx.font);
 }
 
-/// # Safety
-/// `ctx` must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn wolpa_destroy(ctx: *mut WolpaContext) {
     if ctx.is_null() {
@@ -102,8 +101,6 @@ pub unsafe extern "C" fn wolpa_destroy(ctx: *mut WolpaContext) {
     });
 }
 
-/// # Safety
-/// `ctx` and `keys_ptr` must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn wolpa_input(
     ctx: *mut WolpaContext,
@@ -112,14 +109,16 @@ pub unsafe extern "C" fn wolpa_input(
     if ctx.is_null() || keys_ptr.is_null() {
         return false;
     }
-    let ctx = &mut *ctx;
-    let keys = unsafe { std::ffi::CStr::from_ptr(keys_ptr) }.to_string_lossy();
-    ctx.input_queue.push(keys.into_owned());
+    unsafe {
+        (*ctx).input_queue.push(
+            std::ffi::CStr::from_ptr(keys_ptr)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
     true
 }
 
-/// # Safety
-/// `ctx`, `width`, `height` must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn wolpa_get_cell_size(
     ctx: *const WolpaContext,
@@ -129,15 +128,10 @@ pub unsafe extern "C" fn wolpa_get_cell_size(
     if ctx.is_null() || width.is_null() || height.is_null() {
         return;
     }
-    let ctx = &*ctx;
-    *width = ctx.font.metrics.width;
-    *height = ctx.font.metrics.height;
+    *width = (*ctx).font.metrics.width;
+    *height = (*ctx).font.metrics.height;
 }
 
-/// Send a mouse event to nvim.
-///
-/// # Safety
-/// `ctx`, `button`, `action` must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn wolpa_mouse(
     ctx: *mut WolpaContext,
@@ -149,18 +143,18 @@ pub unsafe extern "C" fn wolpa_mouse(
     if ctx.is_null() || button.is_null() || action.is_null() {
         return false;
     }
-    let ctx = &mut *ctx;
-    let btn = std::ffi::CStr::from_ptr(button).to_string_lossy();
-    let act = std::ffi::CStr::from_ptr(action).to_string_lossy();
-    ctx.runtime.block_on(async {
-        ctx.client
+    let btn = unsafe { std::ffi::CStr::from_ptr(button) }.to_string_lossy();
+    let act = unsafe { std::ffi::CStr::from_ptr(action) }.to_string_lossy();
+    (*ctx).runtime.block_on(async {
+        (*ctx)
+            .client
             .call(
                 "nvim_input_mouse",
                 vec![
                     rmpv::Value::String(btn.as_ref().into()),
                     rmpv::Value::String(act.as_ref().into()),
                     rmpv::Value::String("".into()),
-                    rmpv::Value::from(2u64), // grid 2 (editor window)
+                    rmpv::Value::from(2u64),
                     rmpv::Value::from(row),
                     rmpv::Value::from(col),
                 ],
@@ -170,46 +164,37 @@ pub unsafe extern "C" fn wolpa_mouse(
     })
 }
 
-/// Change font size and update layout.
-///
-/// # Safety
-/// `ctx` must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn wolpa_set_font_size(ctx: *mut WolpaContext, pt_size: f64) -> bool {
     if ctx.is_null() {
         return false;
     }
-    let ctx = &mut *ctx;
-    ctx.font = Font::new(pt_size * ctx.scale, ctx.scale);
-    // Resize nvim grid to match new cell count
-    let cw = ctx.font.metrics.width;
-    let ch = ctx.font.metrics.height;
-    // We keep the same pixel area but compute new cols/rows
-    // Actually, we just notify nvim to keep current grid size.
-    // The user resizes the window to change grid dimensions.
-    ctx.runtime.block_on(async {
-        ctx.client
+    (*ctx).font = Font::new(pt_size * (*ctx).scale, (*ctx).scale);
+    (*ctx).runtime.block_on(async {
+        (*ctx)
+            .client
             .call(
                 "nvim_ui_try_resize",
-                vec![rmpv::Value::from(ctx.cols), rmpv::Value::from(ctx.rows)],
+                vec![
+                    rmpv::Value::from((*ctx).cols),
+                    rmpv::Value::from((*ctx).rows),
+                ],
             )
             .await
             .is_ok()
     })
 }
 
-/// # Safety
-/// `ctx` must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn wolpa_resize(ctx: *mut WolpaContext, cols: u64, rows: u64) -> bool {
     if ctx.is_null() {
         return false;
     }
-    let ctx = &mut *ctx;
-    ctx.cols = cols;
-    ctx.rows = rows;
-    ctx.runtime.block_on(async {
-        ctx.client
+    (*ctx).cols = cols;
+    (*ctx).rows = rows;
+    (*ctx).runtime.block_on(async {
+        (*ctx)
+            .client
             .call(
                 "nvim_ui_try_resize",
                 vec![rmpv::Value::from(cols), rmpv::Value::from(rows)],
