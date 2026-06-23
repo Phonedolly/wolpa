@@ -128,6 +128,70 @@ pub unsafe extern "C" fn wolpa_get_cell_size(
     *height = ctx.font.metrics.height;
 }
 
+/// Send a mouse event to nvim.
+///
+/// # Safety
+/// `ctx`, `button`, `action` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wolpa_mouse(
+    ctx: *mut WolpaContext,
+    button: *const std::ffi::c_char,
+    action: *const std::ffi::c_char,
+    row: u64,
+    col: u64,
+) -> bool {
+    if ctx.is_null() || button.is_null() || action.is_null() {
+        return false;
+    }
+    let ctx = &mut *ctx;
+    let btn = std::ffi::CStr::from_ptr(button).to_string_lossy();
+    let act = std::ffi::CStr::from_ptr(action).to_string_lossy();
+    ctx.runtime.block_on(async {
+        ctx.client
+            .call(
+                "nvim_input_mouse",
+                vec![
+                    rmpv::Value::String(btn.as_ref().into()),
+                    rmpv::Value::String(act.as_ref().into()),
+                    rmpv::Value::String("".into()),
+                    rmpv::Value::from(2u64), // grid 2 (editor window)
+                    rmpv::Value::from(row),
+                    rmpv::Value::from(col),
+                ],
+            )
+            .await
+            .is_ok()
+    })
+}
+
+/// Change font size and update layout.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wolpa_set_font_size(ctx: *mut WolpaContext, pt_size: f64) -> bool {
+    if ctx.is_null() {
+        return false;
+    }
+    let ctx = &mut *ctx;
+    ctx.font = Font::new(pt_size * ctx.scale, ctx.scale);
+    // Resize nvim grid to match new cell count
+    let cw = ctx.font.metrics.width;
+    let ch = ctx.font.metrics.height;
+    // We keep the same pixel area but compute new cols/rows
+    // Actually, we just notify nvim to keep current grid size.
+    // The user resizes the window to change grid dimensions.
+    ctx.runtime.block_on(async {
+        ctx.client
+            .call(
+                "nvim_ui_try_resize",
+                vec![rmpv::Value::from(ctx.cols), rmpv::Value::from(ctx.rows)],
+            )
+            .await
+            .is_ok()
+    })
+}
+
 /// # Safety
 /// `ctx` must be valid.
 #[no_mangle]

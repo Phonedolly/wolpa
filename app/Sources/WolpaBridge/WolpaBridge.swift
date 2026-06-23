@@ -22,6 +22,12 @@ public func wolpa_get_cell_size(_ ctx: OpaquePointer, _ width: UnsafeMutablePoin
 @_silgen_name("wolpa_resize")
 public func wolpa_resize(_ ctx: OpaquePointer, _ cols: UInt64, _ rows: UInt64) -> Bool
 
+@_silgen_name("wolpa_mouse")
+public func wolpa_mouse(_ ctx: OpaquePointer, _ button: UnsafePointer<CChar>, _ action: UnsafePointer<CChar>, _ row: UInt64, _ col: UInt64) -> Bool
+
+@_silgen_name("wolpa_set_font_size")
+public func wolpa_set_font_size(_ ctx: OpaquePointer, _ pt_size: Double) -> Bool
+
 public enum Bridge {
 
     /// Initialize the renderer with a CAMetalLayer.
