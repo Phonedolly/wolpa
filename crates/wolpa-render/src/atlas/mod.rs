@@ -36,7 +36,7 @@ impl GlyphAtlas {
         desc.set_pixel_format(metal::MTLPixelFormat::RGBA8Unorm);
         desc.set_width(size);
         desc.set_height(size);
-        desc.set_storage_mode(metal::MTLStorageMode::Managed);
+        desc.set_storage_mode(metal::MTLStorageMode::Shared);
 
         let texture = device.new_texture(&desc);
 
